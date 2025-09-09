@@ -1,0 +1,268 @@
+{
+  "caps":
+  {
+    "informal": 1,
+    "axes": 6,
+    "usb_cdc": 1,
+    "uart": 1,
+    "spindle_pwm": 1,
+    "spindle_dir": 1,
+    "spindle_sync": 1,
+    "serial_ports": 2,
+    "eeprom": 1,
+    "i2c_strobe": 1,
+    "ganged_axes": 1,
+    "auto_square": 1,
+    "digital_in": 8,
+    "digital_out": 8,
+    "analog_out": 1,
+    "analog_pwm_out": 4,
+    "probe": 1,
+    "safety_door": 1,
+    "estop": 1,
+    "mpg_mode": 1,
+    "sdcard": 1,
+    "wifi": 1,
+    "wiznet": 1,
+    "littlefs": 1,
+    "bluetooth": 1,
+    "rgb_out": 2,
+    "mcp3221_adc": 1,
+    "plugins": [
+      { "id": "motors" },
+      { "id": "spindle" },
+      { "id": "modbus" },
+      { "id": "eeprom" },
+      { "id": "sdcard" },
+      { "id": "webui" },
+      { "id": "networking" },
+      { "id": "keypad" },
+      { "id": "macros" },
+      { "id": "laser_cluster" },
+      { "id": "laser_coolant" },
+      { "id": "laser_overdrive" },
+      { "id": "bluetooth" },
+      { "id": "fans" },
+      { "id": "rgb_leds" },
+      { "id": "eventout" },
+      { "id": "homing_pulloff" },
+      { "id": "feed_override" },
+      { "id": "pwm_servo" },
+      { "id": "bltouch" },
+      { "id": "plasma" },
+      { "id": "esp_at" },
+      { "id": "embroidery" }
+    ]
+  },
+  "docker_instance": "RP2040",
+  "symbols": {
+    "OVERRIDE_MY_MACHINE": 1
+  },
+  "boards": [
+    {
+      "name": "PicoCNC",
+      "symbol": "BOARD_PICO_CNC",
+      "URL": "https://github.com/phil-barrett/PicoCNC",
+      "MAP": "boards/pico_cnc_map.h",
+      "caps": {
+        "axes": 5,
+        "digital_in": 4,
+        "digital_out": 8,
+        "i2c_strobe": 1,
+        "eeprom": 1,
+        "fram": 1,
+        "i2c": 1,
+        "sdcard": 1,
+		"rgb_out": 1,
+        "wifi": 1,
+        "wiznet": 1,
+        "bluetooth": 1
+      }
+    },
+    {
+      "name": "PicoCNC w/RP2350",
+      "symbol": "BOARD_PICO_CNC",
+      "URL": "https://github.com/phil-barrett/PicoCNC",
+      "MAP": "boards/pico_cnc_map.h",
+      "caps": {
+        "axes": 5,
+        "digital_in": 4,
+        "digital_out": 8,
+        "i2c_strobe": 1,
+        "eeprom": 1,
+        "fram": 1,
+        "i2c": 1,
+        "sdcard": 1,
+		"rgb_out": 1,
+        "wifi": 1,
+        "wiznet": 1,
+        "bluetooth": 1
+      },
+      "symbols": {
+          "RP_MCU": "2350",
+          "RP_BOARD": "pico2"
+      }
+    },
+    {
+      "name": "PicoBOB",
+      "symbol": "BOARD_PICOBOB",
+      "URL": "https://github.com/Expatria-Technologies/PicoBOB",
+      "MAP": "boards/picobob_map.h",
+      "caps": {
+        "axes": 5,
+        "safety_door": 0,
+        "serial_ports": 0
+      }
+    },
+    {
+      "name": "PicoBOB_G540",
+      "symbol": "BOARD_PICOBOB_G540",
+      "URL": "https://github.com/Expatria-Technologies/PicoBOB",
+      "MAP": "boards/picobob_g540_map.h",
+      "caps": {
+        "axes": 4,
+        "safety_door": 0,
+        "serial_ports": 0
+      }
+    },
+    {
+      "name": "PicoBOB_DLX",
+      "symbol": "BOARD_PICOBOB_DLX",
+      "URL": "https://github.com/Expatria-Technologies/PicoBOB-DLX",
+      "MAP": "boards/picobob_dlx_map.h",
+      "caps": {
+        "axes": 5,
+        "digital_in": 2,
+        "digital_out": 3,
+        "i2c_strobe": 1,
+        "safety_door": 0,
+        "serial_ports": 0,
+        "wiznet": 5500
+      }
+    },
+    {
+      "name": "PicoBOB_DLX_G540",
+      "symbol": "BOARD_PICOBOB_DLX",
+      "URL": "https://github.com/Expatria-Technologies/PicoBOB-DLX",
+      "MAP": "boards/picobob_dlx_g540_map.h",
+      "caps": {
+        "axes": 4,
+        "digital_in": 2,
+        "digital_out": 3,
+        "i2c_strobe": 1,
+        "safety_door": 0,
+        "serial_ports": 0,
+        "wiznet": 5500
+      }
+    },
+    {
+      "name": "PicoHAL",
+      "symbol": "BOARD_PICOHAL",
+      "URL": "https://github.com/Expatria-Technologies/PicoHAL_HW",
+      "MAP": "boards/picohal_map.h",
+      "caps": {
+        "axes": 4,
+        "digital_in": 3,
+        "digital_out": 1,
+        "i2c_strobe": 0,
+        "safety_door": 0,
+        "serial_ports": 2,
+        "i2c": 0,
+        "rgb_out": 1,
+        "wiznet": 5500
+      }
+    },    
+    {
+      "name": "BTT SKR Pico 1.0",
+      "symbol": "BOARD_BTT_SKR_PICO_10",
+      "URL": "https://github.com/bigtreetech/SKR-Pico",
+      "MAP": "boards/btt_skr_pico_10_map.h",
+      "caps": {
+        "axes": 4,
+        "analog_pwm_out": 1,
+		"rgb_out": 1,
+        "trinamic": 2209,
+        "trinamic_uart_addr": 1
+      }
+    },
+    {
+      "name": "RP23U5XBB",
+      "symbol": "BOARD_RP23U5XBB",
+      "URL": "https://github.com/phil-barrett/PicoCNC",
+      "MAP": "boards/RP2350B_5X_map.h",
+      "caps": {
+        "axes": 5,
+        "digital_in": 4,
+        "digital_out": 8,
+        "i2c_strobe": 1,
+        "eeprom": 0,
+        "fram": 0,
+        "i2c": 1,
+        "sdcard": 1,
+		"rgb_out": 1,
+        "wifi": 0,
+        "wiznet": 1,
+        "bluetooth": 1,
+        "spindle_sync": 1
+      },
+      "symbols": {
+          "RP_MCU": "2350"
+      }
+    },
+	{
+      "name": "Generic",
+      "symbol": "",
+      "MAP": "boards/generic_map.h",
+      "caps": {
+        "axes": 3,
+        "digital_in": 1,
+        "digital_out": 3,
+        "i2c_strobe": 1,
+        "wifi": 1,
+        "bluetooth": 1
+      }
+    },
+    {
+      "name": "Generic 4 axis",
+      "symbol": "BOARD_GENERIC_4AXIS",
+      "MAP": "boards/generic_map_4axis.h",
+      "caps": {
+        "axes": 4,
+        "wifi": 1,
+        "bluetooth": 1
+      }
+    },
+	{
+      "name": "Generic w/RP2350",
+      "symbol": "",
+      "MAP": "boards/generic_map.h",
+      "caps": {
+        "axes": 3,
+        "digital_in": 1,
+        "digital_out": 3,
+        "i2c_strobe": 1,
+        "wifi": 0,
+        "bluetooth": 1
+      },
+      "symbols": {
+          "RP_MCU": "2350",
+          "RP_BOARD": "pico2"
+      }
+    },
+    {
+      "name": "Generic 4 axis w/RP2350",
+      "symbol": "BOARD_GENERIC_4AXIS",
+      "MAP": "boards/generic_map_4axis.h",
+      "caps": {
+        "axes": 4,
+        "i2c_strobe": 1,
+        "wifi": 0,
+        "bluetooth": 1
+      },
+      "symbols": {
+          "RP_MCU": "2350",
+          "RP_BOARD": "pico2"
+      }
+    }
+  ]
+}
