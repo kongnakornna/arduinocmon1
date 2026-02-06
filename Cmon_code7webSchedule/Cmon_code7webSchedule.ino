@@ -1,0 +1,1035 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <PubSubClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <ETH.h>
+#include "Arduino.h"
+#include <Wire.h>
+#include <PCF8574.h>
+#include <EEPROM.h>
+#include <HardwareSerial.h>
+#include <WebServer.h>
+#include <WiFi.h>
+
+// ------------------ Configuration / Globals ------------------
+#define EEPROM_SIZE 64
+
+// Pin Definitions
+const int buttonPin1 = 36;  // Input 1
+const int buttonPin2 = 39;  // Input 2
+const int Relay1 = 2;       // Relay 1
+const int Relay2 = 15;      // Relay 2
+const int Buzzer = 12;      // Buzzer
+const int working_led = 32; // Status LED
+const int oneWireBus = 33;  // DS18B20 Data pin
+
+// Temperature Sensor
+OneWire oneWire(oneWireBus);
+DallasTemperature sensors(&oneWire);
+DeviceAddress tempSensorAddress;
+bool tempSensorFound = false;
+float currentTemperature = 0.0;
+const float TEMP_ERROR_VALUE = -127.0;
+unsigned long lastTempReadTime = 0;
+const long tempReadInterval = 2000;
+
+// Ethernet Configuration
+#define ETH_ADDR        0
+#define ETH_POWER_PIN  -1
+#define ETH_MDC_PIN    23
+#define ETH_MDIO_PIN   18
+#define ETH_TYPE       ETH_PHY_LAN8720
+#define ETH_CLK_MODE   ETH_CLOCK_GPIO17_OUT
+
+// IP Address Configuration
+IPAddress local_ip(172, 25, 99, 51);
+IPAddress subnet(255, 255, 255, 0);
+IPAddress gateway(172, 25, 99, 62);
+IPAddress dns(8, 8, 8, 8);
+
+// MQTT Configuration
+const char* dataTopic = "ICMON001/DATA";
+const char* controlTopic = "ICMON001/CONTROL";
+const char* tempTopic = "ICMON001/DATAJSON";
+//const char* mqttServer = "broker.hivemq.com";
+const char* mqttServer = "172.25.99.60";
+const int mqttPort = 1883;
+const char* mqttClientID = "ICMON001";
+
+// Web Server Configuration
+WebServer server(80);
+
+// Timing Intervals
+const long publishInterval = 5000;
+const long workingInterval = 1000;
+const long buzzerInterval = 500;
+const unsigned long debounceDelay = 50;
+
+// Global Variables
+WiFiClient ethClient;
+PubSubClient mqttClient(ethClient);
+
+// Input states
+int inputState1 = LOW;
+int lastInputState1 = LOW;
+int stableInputState1 = LOW;
+unsigned long lastDebounceTime1 = 0;
+
+int inputState2 = LOW;
+int lastInputState2 = LOW;
+int stableInputState2 = LOW;
+unsigned long lastDebounceTime2 = 0;
+
+// Timing variables
+unsigned long lastPublishTime = 0;
+unsigned long workingUpdate = 0;
+unsigned long buzzerTimer = 0;
+bool status_working_led = HIGH;
+bool buzzerState = LOW;
+bool buzzerActive = false;
+
+// Relay states
+bool relay1State = LOW;
+bool relay2State = LOW;
+
+// Last update times
+String lastInputUpdateTime = "--:--:--";
+String lastRelayUpdateTime = "--:--:--";
+String lastTempUpdateTime = "--:--:--";
+
+// Function Prototypes
+void setupEthernet();
+void setupTemperatureSensor();
+void readTemperature();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+void reconnect();
+bool debounceRead(int pin, int &lastState, int &stableState, unsigned long &lastDebounceTime);
+void readInputs();
+void handleBuzzer();
+void handleStatusLED();
+void sendDataMQTT();
+void sendTemperatureMQTT();
+void processMQTTCommand(String command);
+void controlRelay(int relayNumber, bool state);
+void parseRelayCommand(String command);
+
+// Web Server Handlers
+void handleRoot();
+void handleData();
+void handleControl();
+void handleNotFound();
+String getCurrentTime();
+
+void setup() {
+    Serial.begin(115200);
+    EEPROM.begin(EEPROM_SIZE);
+    
+    // Initialize pins
+    pinMode(working_led, OUTPUT);
+    pinMode(Relay1, OUTPUT);
+    pinMode(Relay2, OUTPUT);
+    pinMode(Buzzer, OUTPUT);
+    pinMode(buttonPin1, INPUT);
+    pinMode(buttonPin2, INPUT);
+    
+    // Initial states
+    digitalWrite(working_led, HIGH);
+    digitalWrite(Buzzer, LOW);
+    digitalWrite(Relay1, LOW);
+    digitalWrite(Relay2, LOW);
+    
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Setup Ethernet
+    setupEthernet();
+    
+    // Setup Temperature Sensor
+    setupTemperatureSensor();
+    
+    // Setup MQTT
+    mqttClient.setServer(mqttServer, mqttPort);
+    mqttClient.setCallback(mqttCallback);
+    
+    // Setup Web Server Routes
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/data", HTTP_GET, handleData);
+    server.on("/control", HTTP_POST, handleControl);
+    server.onNotFound(handleNotFound);
+    
+    server.begin();
+    Serial.println("HTTP server started");
+    Serial.print("Dashboard URL: http://");
+    Serial.println(ETH.localIP());
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+    
+    // Handle Web Server requests
+    server.handleClient();
+    
+    // Maintain MQTT connection
+    if (!mqttClient.connected()) {
+        reconnect();
+    }
+    mqttClient.loop();
+    
+    // Handle status LED
+    handleStatusLED();
+    
+    // Handle buzzer if active
+    if (buzzerActive) {
+        handleBuzzer();
+    }
+    
+    // Read temperature every 2 seconds
+    if (currentMillis - lastTempReadTime >= tempReadInterval) {
+        lastTempReadTime = currentMillis;
+        readTemperature();
+        lastTempUpdateTime = getCurrentTime();
+        
+        if (tempSensorFound) {
+            sendTemperatureMQTT();
+        }
+    }
+    
+    // Read inputs
+    readInputs();
+    
+    // Publish data every 5 seconds
+    if (currentMillis - lastPublishTime >= publishInterval) {
+        lastPublishTime = currentMillis;
+        sendDataMQTT();
+    }
+}
+
+// ------------------ Ethernet Setup ------------------
+void setupEthernet() {
+    Serial.println("Initializing Ethernet...");
+    ETH.begin(ETH_ADDR, ETH_POWER_PIN, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_TYPE, ETH_CLK_MODE);
+    
+    if (ETH.config(local_ip, gateway, subnet, dns, dns) == false) {
+        Serial.println("LAN8720 Configuration failed.");
+    } else {
+        Serial.println("LAN8720 Configuration success.");
+    }
+    
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    Serial.print("IP Address: ");
+    Serial.println(ETH.localIP());
+}
+
+// ------------------ Temperature Sensor Setup ------------------
+void setupTemperatureSensor() {
+    Serial.println("Initializing DS18B20 temperature sensor...");
+    
+    sensors.begin();
+    
+    int deviceCount = sensors.getDeviceCount();
+    Serial.print("Found ");
+    Serial.print(deviceCount);
+    Serial.println(" devices.");
+    
+    if (deviceCount > 0) {
+        if (sensors.getAddress(tempSensorAddress, 0)) {
+            tempSensorFound = true;
+            sensors.setResolution(tempSensorAddress, 12);
+            sensors.setWaitForConversion(false);
+        }
+    } else {
+        tempSensorFound = false;
+    }
+    
+    if (tempSensorFound) {
+        sensors.requestTemperatures();
+    }
+}
+
+// ------------------ Read Temperature ------------------
+void readTemperature() {
+    if (!tempSensorFound) {
+        currentTemperature = TEMP_ERROR_VALUE;
+        return;
+    }
+    
+    if (sensors.isConversionComplete()) {
+        float tempC = sensors.getTempC(tempSensorAddress);
+        
+        if (tempC != DEVICE_DISCONNECTED_C) {
+            currentTemperature = tempC;
+        } else {
+            currentTemperature = TEMP_ERROR_VALUE;
+        }
+        
+        sensors.requestTemperatures();
+    }
+}
+
+// ------------------ MQTT Callback ------------------
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+    String message;
+    for (unsigned int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    
+    processMQTTCommand(message);
+}
+
+// ------------------ MQTT Reconnect ------------------
+void reconnect() {
+    static unsigned long lastReconnectAttempt = 0;
+    unsigned long currentMillis = millis();
+    
+    if (currentMillis - lastReconnectAttempt >= 5000) {
+        lastReconnectAttempt = currentMillis;
+        
+        Serial.print("MQTT connecting...");
+        
+        if (mqttClient.connect(mqttClientID)) {
+            Serial.println("connected");
+            mqttClient.subscribe(controlTopic);
+        } else {
+            Serial.println("failed");
+        }
+    }
+}
+
+// ------------------ Debounce Function ------------------
+bool debounceRead(int pin, int &lastState, int &stableState, unsigned long &lastDebounceTime) {
+    int reading = digitalRead(pin);
+    unsigned long currentMillis = millis();
+    bool stateChanged = false;
+    
+    if (reading != lastState) {
+        lastDebounceTime = currentMillis;
+    }
+    
+    if ((currentMillis - lastDebounceTime) > debounceDelay) {
+        if (reading != stableState) {
+            stableState = reading;
+            stateChanged = true;
+            lastInputUpdateTime = getCurrentTime(); // อัพเดทเวลาทุกครั้งที่ Input เปลี่ยน
+        }
+    }
+    
+    lastState = reading;
+    return stateChanged;
+}
+
+// ------------------ Read Inputs ------------------
+void readInputs() {
+    if (debounceRead(buttonPin1, lastInputState1, stableInputState1, lastDebounceTime1)) {
+        if (stableInputState1 == HIGH) {
+            buzzerActive = true;
+            buzzerTimer = millis();
+        }
+    }
+    
+    if (debounceRead(buttonPin2, lastInputState2, stableInputState2, lastDebounceTime2)) {
+        if (stableInputState2 == HIGH) {
+            buzzerActive = true;
+            buzzerTimer = millis();
+        }
+    }
+    
+    inputState1 = stableInputState1;
+    inputState2 = stableInputState2;
+}
+
+// ------------------ Handle Buzzer ------------------
+void handleBuzzer() {
+    unsigned long currentMillis = millis();
+    
+    if (currentMillis - buzzerTimer >= buzzerInterval) {
+        buzzerTimer = currentMillis;
+        buzzerState = !buzzerState;
+        digitalWrite(Buzzer, buzzerState ? HIGH : LOW);
+        
+        static int beepCount = 0;
+        beepCount++;
+        
+        if (beepCount >= 1) {
+            buzzerActive = false;
+            beepCount = 0;
+            digitalWrite(Buzzer, LOW);
+        }
+    }
+}
+
+// ------------------ Handle Status LED ------------------
+void handleStatusLED() {
+    unsigned long currentMillis = millis();
+    
+    if (currentMillis - workingUpdate >= workingInterval) {
+        workingUpdate = currentMillis;
+        status_working_led = !status_working_led;
+        digitalWrite(working_led, status_working_led);
+    }
+}
+
+void sendDataMQTT() {
+  char msgBuffer[250];
+
+  // รูปแบบ: input1,input2,relay1,relay2,temperature,temp_sensor,ip
+  snprintf(
+    msgBuffer,
+    sizeof(msgBuffer),
+    "%d,%d,%d,%d,%.2f,%d,%s",
+    inputState1,
+    inputState2,
+    relay1State,
+    relay2State,
+    currentTemperature,
+    tempSensorFound ? 1 : 0,
+    ETH.localIP().toString().c_str()
+  );
+
+  mqttClient.publish(dataTopic, msgBuffer);
+}
+
+/*
+
+// ------------------ Send Data via MQTT ------------------
+void sendDataMQTT() {
+    char msgBuffer[250];
+    snprintf(
+        msgBuffer,
+        sizeof(msgBuffer),
+        "{\"input1\":%d,\"input2\":%d,\"relay1\":%d,\"relay2\":%d,\"temperature\":%.2f,\"temp_sensor\":%s,\"ip\":\"%s\"}",
+        inputState1,
+        inputState2,
+        relay1State,
+        relay2State,
+        currentTemperature,
+        tempSensorFound ? "true" : "false",
+        ETH.localIP().toString().c_str()
+    );
+    
+    mqttClient.publish(dataTopic, msgBuffer);
+}
+*/
+// ------------------ Send Temperature via MQTT ------------------
+void sendTemperatureMQTT() {
+    char tempMsg[150];
+    snprintf(
+        tempMsg,
+        sizeof(tempMsg),
+        "{\"temperature\":%.2f,\"unit\":\"C\",\"sensor_status\":%s}",
+        currentTemperature,
+        tempSensorFound ? "\"OK\"" : "\"ERROR\""
+    );
+    
+    mqttClient.publish(tempTopic, tempMsg);
+}
+
+// ------------------ Control Relay Function ------------------
+void controlRelay(int relayNumber, bool state) {
+    if (relayNumber == 1) {
+        digitalWrite(Relay1, state ? HIGH : LOW);
+        relay1State = state;
+        lastRelayUpdateTime = getCurrentTime(); // อัพเดทเวลาทุกครั้งที่ควบคุมรีเลย์
+    } 
+    else if (relayNumber == 2) {
+        digitalWrite(Relay2, state ? HIGH : LOW);
+        relay2State = state;
+        lastRelayUpdateTime = getCurrentTime(); // อัพเดทเวลาทุกครั้งที่ควบคุมรีเลย์
+    }
+    
+    buzzerActive = true;
+    buzzerTimer = millis();
+}
+
+// ------------------ Parse Relay Command ------------------
+void parseRelayCommand(String command) {
+    command.trim();
+    command.toUpperCase();
+    command.replace(" ", "");
+    
+    if (command == "RELAY1=ON") {
+        controlRelay(1, true);
+    }
+    else if (command == "RELAY1=OFF") {
+        controlRelay(1, false);
+    }
+    else if (command == "RELAY2=ON") {
+        controlRelay(2, true);
+    }
+    else if (command == "RELAY2=OFF") {
+        controlRelay(2, false);
+    }
+    else if (command == "ALL=ON" || command == "ALL_ON") {
+        controlRelay(1, true);
+        controlRelay(2, true);
+    }
+    else if (command == "ALL=OFF" || command == "ALL_OFF") {
+        controlRelay(1, false);
+        controlRelay(2, false);
+    }
+}
+
+// ------------------ Process MQTT Commands ------------------
+void processMQTTCommand(String command) {
+    String cmdUpper = command;
+    cmdUpper.trim();
+    cmdUpper.toUpperCase();
+    
+    if (cmdUpper.startsWith("RELAY1=") || cmdUpper.startsWith("RELAY2=") || 
+        cmdUpper == "ALL=ON" || cmdUpper == "ALL=OFF" ||
+        cmdUpper == "ALL_ON" || cmdUpper == "ALL_OFF") {
+        parseRelayCommand(command);
+        return;
+    }
+    
+    if (command == "10") controlRelay(1, false);
+    else if (command == "11") controlRelay(1, true);
+    else if (command == "20") controlRelay(2, false);
+    else if (command == "21") controlRelay(2, true);
+}
+
+// ------------------ Get Current Time ------------------
+String getCurrentTime() {
+    unsigned long currentMillis = millis();
+    unsigned long seconds = currentMillis / 1000;
+    unsigned long minutes = seconds / 60;
+    unsigned long hours = minutes / 60;
+    
+    seconds = seconds % 60;
+    minutes = minutes % 60;
+    hours = hours % 24;
+    
+    char buffer[9];
+    sprintf(buffer, "%02lu:%02lu:%02lu", hours, minutes, seconds);
+    return String(buffer);
+}
+
+// ------------------ Web Server Handlers ------------------
+void handleRoot() {
+    String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 IoT Dashboard</title>
+    <style>
+        * { 
+            margin: 0; 
+            padding: 0; 
+            box-sizing: border-box; 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        body { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            color: white;
+            padding: 25px 40px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 2.2rem;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 15px;
+        }
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+        .dashboard {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 25px;
+            padding: 40px;
+        }
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.08);
+            border: 1px solid #e5e7eb;
+            transition: transform 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        .card-title {
+            color: #4f46e5;
+            margin-bottom: 25px;
+            font-size: 1.3rem;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .card-title i {
+            font-size: 1.5rem;
+        }
+        .temperature-display {
+            text-align: center;
+            padding: 20px 0;
+        }
+        .temp-value {
+            font-size: 4rem;
+            font-weight: 700;
+            color: #dc2626;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+        }
+        .temp-unit {
+            font-size: 2rem;
+            color: #6b7280;
+            margin-left: 5px;
+        }
+        .temp-status {
+            display: inline-block;
+            padding: 8px 20px;
+            border-radius: 20px;
+            background: #f3f4f6;
+            font-size: 0.9rem;
+            margin-top: 15px;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        .status-item {
+            text-align: center;
+            padding: 20px;
+            border-radius: 12px;
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+        }
+        .status-label {
+            font-size: 0.9rem;
+            color: #6b7280;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .status-value {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+        }
+        .status-on {
+            color: #10b981;
+        }
+        .status-off {
+            color: #ef4444;
+        }
+        .control-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 20px;
+        }
+        .btn {
+            padding: 16px;
+            border: none;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .btn i {
+            font-size: 1.2rem;
+        }
+        .btn-on {
+            background: linear-gradient(135deg, #10b981, #34d399);
+            color: white;
+        }
+        .btn-on:hover {
+            background: linear-gradient(135deg, #0da271, #2bb987);
+            transform: scale(1.05);
+        }
+        .btn-off {
+            background: linear-gradient(135deg, #ef4444, #f87171);
+            color: white;
+        }
+        .btn-off:hover {
+            background: linear-gradient(135deg, #dc2626, #e85c5c);
+            transform: scale(1.05);
+        }
+        .btn-all {
+            grid-column: span 2;
+            background: linear-gradient(135deg, #8b5cf6, #a78bfa);
+            color: white;
+            padding: 18px;
+            margin-top: 10px;
+        }
+        .btn-all:hover {
+            background: linear-gradient(135deg, #7c3aed, #946de3);
+            transform: scale(1.05);
+        }
+        .last-update {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 15px;
+            border-top: 1px solid #e5e7eb;
+            color: #6b7280;
+            font-size: 0.9rem;
+        }
+        .last-update span {
+            font-weight: 600;
+            color: #4f46e5;
+        }
+        .connection-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8fafc;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .info-item {
+            margin: 5px 0;
+        }
+        .info-label {
+            font-size: 0.85rem;
+            color: #6b7280;
+        }
+        .info-value {
+            font-weight: 600;
+            color: #1f2937;
+        }
+        .refresh-btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 15px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.3s;
+        }
+        .refresh-btn:hover {
+            background: #2563eb;
+            transform: scale(1.05);
+        }
+        @media (max-width: 768px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+                padding: 20px;
+            }
+            .header h1 {
+                font-size: 1.8rem;
+            }
+            .temp-value {
+                font-size: 3rem;
+            }
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        let isUpdating = false;
+        
+        async function fetchData() {
+            if (isUpdating) return;
+            isUpdating = true;
+            
+            try {
+                const response = await fetch('/data');
+                if (!response.ok) throw new Error('Network error');
+                const data = await response.json();
+                updateDashboard(data);
+            } catch (error) {
+                console.error('Error:', error);
+                document.getElementById('tempStatus').innerHTML = 
+                    '<i class="fas fa-exclamation-circle"></i> Connection Error';
+                document.getElementById('tempStatus').style.color = '#ef4444';
+            } finally {
+                isUpdating = false;
+            }
+        }
+        
+        function updateDashboard(data) {
+            // Update temperature
+            const tempElement = document.getElementById('temperatureValue');
+            const tempStatus = document.getElementById('tempStatus');
+            
+            if (data.temperature !== undefined && data.temperature !== -127) {
+                tempElement.textContent = data.temperature.toFixed(1);
+                tempStatus.innerHTML = '<i class="fas fa-check-circle"></i> Sensor OK';
+                tempStatus.style.color = '#10b981';
+                document.getElementById('tempUpdateTime').textContent = data.temp_update_time || 'Now';
+            } else {
+                tempElement.textContent = '--.-';
+                tempStatus.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Sensor Error';
+                tempStatus.style.color = '#ef4444';
+            }
+            
+            // Update inputs
+            updateStatus('input1Status', data.input1, 'Input 1');
+            updateStatus('input2Status', data.input2, 'Input 2');
+            
+            // Update relays
+            updateStatus('relay1Status', data.relay1, 'Relay 1');
+            updateStatus('relay2Status', data.relay2, 'Relay 2');
+            
+            // Update times
+            document.getElementById('inputUpdateTime').textContent = data.input_update_time || 'Now';
+            document.getElementById('relayUpdateTime').textContent = data.relay_update_time || 'Now';
+            
+            // Update connection info
+            document.getElementById('ipAddress').textContent = data.ip || '192.168.72.88';
+        }
+        
+        function updateStatus(elementId, status, label) {
+            const element = document.getElementById(elementId);
+            if (status === 1 || status === true) {
+                element.textContent = 'ON';
+                element.className = 'status-value status-on';
+            } else {
+                element.textContent = 'OFF';
+                element.className = 'status-value status-off';
+            }
+        }
+        
+        async function sendCommand(command) {
+            try {
+                const response = await fetch('/control', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'cmd=' + encodeURIComponent(command)
+                });
+                
+                const result = await response.json();
+                console.log('Command result:', result);
+                
+                // Refresh data immediately after command
+                setTimeout(fetchData, 500);
+                
+            } catch (error) {
+                console.error('Command error:', error);
+                alert('Command failed: ' + error.message);
+            }
+        }
+        
+        function controlRelay(relayNumber, state) {
+            const command = state ? `Relay${relayNumber}=ON` : `Relay${relayNumber}=OFF`;
+            sendCommand(command);
+        }
+        
+        function controlAllRelays(state) {
+            const command = state ? 'ALL=ON' : 'ALL=OFF';
+            sendCommand(command);
+        }
+        
+        // Auto-refresh every 3 seconds
+        setInterval(fetchData, 3000);
+        
+        // Initial fetch
+        document.addEventListener('DOMContentLoaded', function() {
+            fetchData();
+        });
+    </script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <i class="fas fa-microchip"></i>
+                ESP32 IoT Dashboard
+            </h1>
+            <p>Device: MROMONI02122025V5001 | IP: <span id="ipAddress">192.168.72.88</span></p>
+        </div>
+        
+        <div class="dashboard">
+            <!-- Temperature Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-thermometer-half"></i>
+                    <h2>Temperature</h2>
+                </div>
+                <div class="temperature-display">
+                    <div id="temperatureValue" class="temp-value">--.-</div>
+                    <div class="temp-unit">°C</div>
+                    <div id="tempStatus" class="temp-status">
+                        <i class="fas fa-spinner fa-spin"></i> Loading...
+                    </div>
+                </div>
+                <div class="last-update">
+                    Updated: <span id="tempUpdateTime">--:--:--</span>
+                </div>
+            </div>
+            
+            <!-- Input Status Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-signal"></i>
+                    <h2>Input Status</h2>
+                </div>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="status-label">INPUT 1</div>
+                        <div id="input1Status" class="status-value status-off">OFF</div>
+                        <div class="status-label">GPIO 36</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">INPUT 2</div>
+                        <div id="input2Status" class="status-value status-off">OFF</div>
+                        <div class="status-label">GPIO 39</div>
+                    </div>
+                </div>
+                <div class="last-update">
+                    Updated: <span id="inputUpdateTime">--:--:--</span>
+                </div>
+            </div>
+            
+            <!-- Relay Control Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-bolt"></i>
+                    <h2>Relay Control</h2>
+                </div>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="status-label">RELAY 1</div>
+                        <div id="relay1Status" class="status-value status-off">OFF</div>
+                        <div class="status-label">GPIO 2</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">RELAY 2</div>
+                        <div id="relay2Status" class="status-value status-off">OFF</div>
+                        <div class="status-label">GPIO 15</div>
+                    </div>
+                </div>
+                
+                <div class="control-buttons">
+                    <button class="btn btn-on" onclick="controlRelay(1, true)">
+                        <i class="fas fa-power-off"></i>
+                        Relay 1 ON
+                    </button>
+                    <button class="btn btn-off" onclick="controlRelay(1, false)">
+                        <i class="fas fa-power-off"></i>
+                        Relay 1 OFF
+                    </button>
+                    <button class="btn btn-on" onclick="controlRelay(2, true)">
+                        <i class="fas fa-power-off"></i>
+                        Relay 2 ON
+                    </button>
+                    <button class="btn btn-off" onclick="controlRelay(2, false)">
+                        <i class="fas fa-power-off"></i>
+                        Relay 2 OFF
+                    </button>
+                    <button class="btn btn-all" onclick="controlAllRelays(true)">
+                        <i class="fas fa-bolt"></i>
+                        ALL ON
+                    </button>
+                    <button class="btn btn-all" onclick="controlAllRelays(false)">
+                        <i class="fas fa-ban"></i>
+                        ALL OFF
+                    </button>
+                </div>
+                
+                <div class="last-update">
+                    Updated: <span id="relayUpdateTime">--:--:--</span>
+                </div>
+            </div>
+            
+            <!-- Connection Info Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-wifi"></i>
+                    <h2>Connection Info</h2>
+                </div>
+                <div class="connection-info">
+                    <div class="info-item">
+                        <div class="info-label">MQTT Status</div>
+                        <div class="info-value" id="mqttStatus">Connected</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Web Server</div>
+                        <div class="info-value">Port 80</div>
+                    </div>
+                    <button class="refresh-btn" onclick="fetchData()">
+                        <i class="fas fa-sync-alt"></i>
+                        Refresh Data
+                    </button>
+                </div>
+                <div class="last-update">
+                    Auto-refresh every 3 seconds
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+)rawliteral";
+    
+    server.send(200, "text/html", html);
+}
+
+void handleData() {
+    // Create JSON response with update times
+    String json = "{";
+    json += "\"input1\":" + String(inputState1) + ",";
+    json += "\"input2\":" + String(inputState2) + ",";
+    json += "\"relay1\":" + String(relay1State) + ",";
+    json += "\"relay2\":" + String(relay2State) + ",";
+    json += "\"temperature\":" + String(currentTemperature, 1) + ",";
+    json += "\"temp_sensor\":" + String(tempSensorFound ? "true" : "false") + ",";
+    json += "\"input_update_time\":\"" + lastInputUpdateTime + "\",";
+    json += "\"relay_update_time\":\"" + lastRelayUpdateTime + "\",";
+    json += "\"temp_update_time\":\"" + lastTempUpdateTime + "\",";
+    json += "\"ip\":\"" + ETH.localIP().toString() + "\"";
+    json += "}";
+    
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache");
+    server.send(200, "application/json", json);
+}
+
+void handleControl() {
+    if (server.hasArg("cmd")) {
+        String command = server.arg("cmd");
+        
+        processMQTTCommand(command);
+        
+        // Send response
+        String response = "{";
+        response += "\"status\":\"success\",";
+        response += "\"command\":\"" + command + "\",";
+        response += "\"relay1\":" + String(relay1State) + ",";
+        response += "\"relay2\":" + String(relay2State);
+        response += "}";
+        
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(200, "application/json", response);
+    } else {
+        server.sendHeader("Access-Control-Allow-Origin", "*");
+        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"No command\"}");
+    }
+}
+
+void handleNotFound() {
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.send(404, "text/plain", "Endpoint not found");
+}
